@@ -102,6 +102,7 @@ const MAX_DIFF_LINES = 100;
 const MAX_BUCKET_SIZE = 98 * 1000 * 1000;
 const MAX_BUCKET_KEYS = BATCH_KEY_MAX;
 const MAX_BATCH_OPERATIONS = 5;
+const PARALLEL_EXPIRE_LIMIT = 5;
 
 function pluralise(count: number) {
 	return count === 1 ? "" : "s";
@@ -360,6 +361,7 @@ export async function syncLegacyAssets(
 				Array.from(namespaceKeys)
 			);
 		} else {
+			const promises: Promise<void>[] = [];
 			for (const namespaceKey of namespaceKeys) {
 				const expiration = namespaceKeyInfoMap.get(namespaceKey)?.expiration;
 
@@ -373,17 +375,28 @@ export async function syncLegacyAssets(
 					continue;
 				}
 
-				const currentValue = await getKVKeyValue(
-					accountId,
-					namespace,
-					namespaceKey
+				const length = promises.push(
+					(async () => {
+						const currentValue = await getKVKeyValue(
+							accountId,
+							namespace,
+							namespaceKey
+						);
+						await putKVKeyValue(accountId, namespace, {
+							key: namespaceKey,
+							value: Buffer.from(currentValue),
+							expiration_ttl: oldAssetTTL,
+						});
+					})()
 				);
-				await putKVKeyValue(accountId, namespace, {
-					key: namespaceKey,
-					value: Buffer.from(currentValue),
-					expiration_ttl: oldAssetTTL,
-				});
+
+				if (length > PARALLEL_EXPIRE_LIMIT) {
+					await Promise.all(promises);
+
+					promises.length = 0;
+				}
 			}
+			await Promise.all(promises);
 		}
 	}
 	logger.log("↗️  Done syncing assets");
